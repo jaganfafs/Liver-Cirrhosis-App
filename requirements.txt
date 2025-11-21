@@ -1,0 +1,12 @@
+streamlit>=1.20
+torch
+timm
+nibabel
+opencv-python-headless
+joblib
+scikit-image
+pillow
+numpy
+matplotlib
+scikit-learn
+cloudpickle
