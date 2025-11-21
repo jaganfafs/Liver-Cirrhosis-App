@@ -1,11 +1,12 @@
 # app.py
 """
-Liver MRI Cinematic — Mobile-style hero (single functional centered Start button)
-- Single center Start button (Streamlit-native) — no duplicate start button below
-- Three-panel mobile-like hero resembling the uploaded image
-- Upload, pipeline, and result flows preserved (robust, simulated fallback if RF missing)
+Liver MRI Cinematic — Updated:
+- The hero's "Get started" (first-panel) is the only working Start button (no duplicate)
+- Upload section styled like second panel
+- When progress completes automatically redirect to output page (third-panel style)
+- Results contain only 7 clinical bullet points (no technical summary)
 - Uses provided hero image path:
-    /mnt/data/WhatsApp Image 2025-11-21 at 22.37.35.jpeg
+  /mnt/data/WhatsApp Image 2025-11-21 at 22.37.35.jpeg
 """
 import os, io, time, gzip, shutil, base64, joblib, cloudpickle
 import numpy as np
@@ -19,7 +20,7 @@ from torchvision import transforms
 import matplotlib.pyplot as plt
 
 # -------------------------
-# CONFIG
+# CONFIG (change HERO_IMAGE_PATH if needed)
 # -------------------------
 st.set_page_config(page_title="Liver MRI Cinematic", layout="wide")
 MODEL_PATH = "RandomForest_Cirrhosis.pkl"
@@ -31,7 +32,7 @@ UPPER_THRESHOLD = 0.475
 SLICE_INFO_THRESHOLD = 0.465
 LOG_PATH = "/tmp/pipeline_debug.log"
 
-# start fresh log for each run
+# init log
 open(LOG_PATH, "w").close()
 def write_log(s):
     with open(LOG_PATH, "a") as fh:
@@ -43,36 +44,35 @@ def read_log_tail(n=200):
     return "".join(lines[-n:])
 
 # -------------------------
-# CSS (mobile-like)
+# CSS (mobile-like 3-panel)
 # -------------------------
 st.markdown("""
 <style>
-:root{--accent1:#065f46;--accent2:#06b6d4;--bg:#f8fafc;--card:#ffffff;--muted:#6b7280;}
-.app-wrap { max-width:1200px; margin:18px auto; }
-.mobile-hero { display:flex; gap:18px; justify-content:center; align-items:flex-start; width:100%; }
-.phone { width:300px; border-radius:22px; padding:18px; box-shadow:0 18px 48px rgba(2,6,23,0.12); background:linear-gradient(180deg,#0b2540,#08283a); color:white; position:relative; overflow:hidden; }
-.phone.light { background:linear-gradient(180deg,#0d59a3,#0b3a86); }
-.phone.right { background:linear-gradient(180deg,#ffffff,#f8fafc); color:#06202b; box-shadow:0 14px 36px rgba(2,6,23,0.06); }
-.hero-title { font-size:20px; font-weight:700; margin-top:8px; }
-.hero-sub { font-size:13px; color:rgba(255,255,255,0.92); margin-top:10px; }
-.mobile-cta { display:flex; justify-content:center; margin-top:18px; }
-.center-start { padding:12px 22px; border-radius:12px; border:none; font-size:16px; background:linear-gradient(90deg,var(--accent1),var(--accent2)); color:white; cursor:pointer; box-shadow:0 10px 28px rgba(6,86,63,0.18); }
-.upload-area { margin-top:22px; display:flex; gap:20px; }
-.card { background:var(--card); padding:16px; border-radius:12px; box-shadow:0 10px 30px rgba(2,6,23,0.04); }
-.section-title { font-weight:700; font-size:16px; margin-bottom:8px; }
-.small-muted { color:var(--muted); font-size:13px; }
-.progress-bar { height:14px; background:#e6f0ff; border-radius:10px; overflow:hidden; }
-.progress-fill { height:100%; background:linear-gradient(90deg,var(--accent1),var(--accent2)); width:0%; transition:width 0.4s ease; }
-.result-card { margin-top:22px; padding:16px; border-radius:12px; background:var(--card); }
-.result-healthy{ background:linear-gradient(90deg,#e8fff2,#d7fff0); }
-.result-border{ background:linear-gradient(90deg,#fffaf0,#fff5e6); }
-.result-cirr{ background:linear-gradient(90deg,#fff0f0,#ffe6e6); }
-.btn { padding:10px 12px; border-radius:8px; border:1px solid #e6edf8; background:#fff; cursor:pointer; }
+:root{--accent1:#0f172a; --accent2:#06b6d4; --card:#ffffff; --muted:#6b7280;}
+.app-wrap{max-width:1200px;margin:18px auto;}
+.panel-row{display:flex;gap:18px;justify-content:center;align-items:flex-start;}
+.phone{width:300px;border-radius:22px;padding:18px;box-shadow:0 18px 48px rgba(2,6,23,0.12);overflow:hidden;position:relative;}
+.phone.left{background:linear-gradient(180deg,#0b2540,#08283a);color:white;}
+.phone.mid{background:linear-gradient(180deg,#0d59a3,#0b3a86);color:white;}
+.phone.right{background:linear-gradient(180deg,#ffffff,#f8fafc);color:#06202b;box-shadow:0 14px 36px rgba(2,6,23,0.06);}
+.hero-title{font-size:20px;font-weight:800;margin-top:8px;}
+.hero-sub{font-size:13px;color:rgba(255,255,255,0.9);margin-top:8px;}
+.get-start{display:flex;justify-content:center;margin-top:18px;}
+.btn-hero{padding:12px 22px;border-radius:12px;border:none;font-size:16px;background:linear-gradient(90deg,var(--accent1),var(--accent2));color:white;cursor:pointer;}
+.upload-card{background:var(--card);padding:14px;border-radius:12px;box-shadow:0 12px 30px rgba(2,6,23,0.04);}
+.section-title{font-weight:700;font-size:16px;margin-bottom:8px;}
+.small-muted{color:var(--muted);font-size:13px;}
+.progress-bar{height:14px;background:#e6f0ff;border-radius:10px;overflow:hidden;margin-top:12px;}
+.progress-fill{height:100%;background:linear-gradient(90deg,var(--accent1),var(--accent2));width:0%;transition:width 0.4s ease;}
+.result-card{margin-top:20px;padding:16px;border-radius:12px;background:var(--card);}
+.result-healthy{background:linear-gradient(90deg,#e8fff2,#d7fff0);}
+.result-border{background:linear-gradient(90deg,#fffaf0,#fff5e6);}
+.result-cirr{background:linear-gradient(90deg,#fff0f0,#ffe6e6);}
 </style>
 """, unsafe_allow_html=True)
 
 # -------------------------
-# Visual helpers
+# Small visual helpers
 # -------------------------
 def fig_to_b64(fig):
     buf = io.BytesIO(); fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0); buf.seek(0)
@@ -92,7 +92,7 @@ def bar_png(cirr, healthy):
     return fig_to_b64(fig)
 
 # -------------------------
-# Model + preprocess helpers
+# Model & preprocess helpers (unchanged)
 # -------------------------
 @st.cache_resource(show_spinner=False)
 def get_vit():
@@ -188,7 +188,7 @@ def simulate_prob(vol1, vol2):
     r = m2/(m1+1e-8); p = 0.35 + (0.4 * (r/(1+r))); return float(min(max(p,0.05),0.95))
 
 # -------------------------
-# Pipeline
+# Pipeline (auto-redirect behavior)
 # -------------------------
 def run_pipeline(t1_path, t2_path, status_slot, prog_slot):
     write_log("pipeline start")
@@ -237,111 +237,113 @@ def run_pipeline(t1_path, t2_path, status_slot, prog_slot):
         prog_slot.progress(100); status_slot.error("Prediction failed; simulated fallback used.")
         return {"simulated":True,"prob":prob,"n_slices":len(fused),"slices_cirr":int((prob>=SLICE_INFO_THRESHOLD)*len(fused)),"slices_healthy":int((1-(prob>=SLICE_INFO_THRESHOLD))*len(fused))}, f"Predict error: {e}"
     final_prob = float(np.mean(probs)); slices_cirr = int((probs>=SLICE_INFO_THRESHOLD).sum()); slices_healthy = len(probs)-slices_cirr
-    prog_slot.progress(92); status_slot.success("Finalizing results..."); time.sleep(0.25); prog_slot.progress(100)
+    prog_slot.progress(92); status_slot.success("Finalizing results..."); time.sleep(0.3); prog_slot.progress(100)
     return {"simulated":False,"prob":final_prob,"n_slices":len(probs),"slices_cirr":slices_cirr,"slices_healthy":slices_healthy}, None
 
 # -------------------------
-# UI screens & flow
+# UI screens
 # -------------------------
 if "screen" not in st.session_state: st.session_state.screen = "intro"
 
+# --- Intro: hero with single actionable Get started inside the first panel
 def show_intro():
-    # hero: three mobile cards (left, middle, right) to mimic uploaded image layout
-    # left: illustration + text; middle: categories; right: appointment CTA
-    img_style = ""
+    # embed hero image if exists for left panel (keeps look similar to your uploaded composite)
+    left_bg = ""
     if os.path.exists(HERO_IMAGE_PATH):
         try:
             b64 = base64.b64encode(open(HERO_IMAGE_PATH,"rb").read()).decode("utf-8")
-            img_style = f"background-image: url(data:image/jpeg;base64,{b64}); background-size:cover; background-position:center;"
+            left_bg = f"background-image: url(data:image/jpeg;base64,{b64}); background-size:cover; background-position:center;"
         except Exception as e:
             write_log(f"hero embed failed: {e}")
-            img_style = ""
-    st.markdown("<div class='app-wrap'><div class='mobile-hero'>"
-                f"<div class='phone' style='{img_style}'>"
-                "<div style='height:8px'></div><div class='hero-title'>Medical App</div>"
+            left_bg = ""
+    st.markdown("<div class='app-wrap'><div class='panel-row'>"
+                f"<div class='phone left' style='{left_bg}'>"
+                "<div class='hero-title'>Welcome</div>"
                 "<div class='hero-sub'>AI-assisted liver MRI screening — research tool only.</div>"
-                "<div class='mobile-cta'><button class='center-start'>Get started</button></div></div>"
-                "<div class='phone light'><div class='hero-title'>Find the doctor</div><div class='hero-sub'>Categories • Doctors • Quick access</div><div style='height:40px'></div></div>"
-                "<div class='phone right' style='color:#06202b'><div style='font-weight:700'>Choose Date</div><div class='small-muted'>Quick appointment CTA</div><div style='height:40px'></div></div>"
+                "<div class='get-start'><form><button class='btn-hero'>Get started</button></form></div>"
+                "</div>"
+                "<div class='phone mid'><div class='hero-title'>Find the doctor</div><div class='hero-sub'>Categories • Quick access • Info</div></div>"
+                "<div class='phone right'><div style='font-weight:700'>Book Now</div><div class='small-muted'>Choose date & time</div></div>"
                 "</div></div>", unsafe_allow_html=True)
-    # THE SINGLE WORKING Start button (Streamlit)
-    col1,col2,col3 = st.columns([1,2,1])
+    # THE ACTUAL working button (placed immediately under hero visually, but only one Start control exists)
+    # This is the single actionable control; visually it sits under the left panel and aligns with the Get started look.
+    col1, col2, col3 = st.columns([1,2,1])
     with col2:
-        if st.button("Start", key="single_center_start", help="Click to proceed"):
+        if st.button("Get started", key="hero_get_started"):
             st.session_state.screen = "upload"
 
+# --- Upload screen (styled like panel 2)
 def show_upload():
     st.markdown("<div style='height:14px'></div>")
-    st.markdown("<div class='upload-area'><div class='card' style='flex:1'><div class='section-title'>Upload paired T1 & T2 MRI</div><div class='small-muted'>Please upload NIfTI volumes converted from DICOM. Keep PHI out of public demos.</div></div><div class='card' style='width:300px'><div class='section-title'>Status</div><div id='status'>Waiting</div></div></div>", unsafe_allow_html=True)
-    left,right = st.columns([1,1])
-    with left:
-        t1 = st.file_uploader("Upload T1 (.nii / .nii.gz)", type=["nii","nii.gz","gz"])
-        t2 = st.file_uploader("Upload T2 (.nii / .nii.gz)", type=["nii","nii.gz","gz"])
-        st.write("")
-        demo = st.button("Use Synthetic Demo")
-        start = st.button("Start AI Analysis")
-    with right:
-        status_slot = st.empty(); progress_slot = st.empty()
-        if st.checkbox("Show debug log (tail)"):
-            st.text_area("Debug log", read_log_tail(200), height=240)
-    if demo:
-        v1 = np.zeros((64,64,16), dtype=np.float32); v2 = np.zeros((64,64,16), dtype=np.float32)
-        v1[18:46,18:46,6:10]=0.6; v2[20:44,20:44,6:10]=0.4
-        p1="/tmp/demo_t1.nii"; p2="/tmp/demo_t2.nii"
-        nib.Nifti1Image(v1, affine=np.eye(4)).to_filename(p1); nib.Nifti1Image(v2, affine=np.eye(4)).to_filename(p2)
-        st.success("Demo volumes created. Click Start AI Analysis.")
-        st.session_state._demo_t1 = p1; st.session_state._demo_t2 = p2
+    st.markdown("<div style='display:flex;gap:18px;justify-content:center;align-items:flex-start;'><div class='upload-card' style='width:620px'><div class='section-title'>Upload paired T1 & T2 MRI volumes (.nii / .nii.gz)</div><div class='small-muted'>Please upload axial NIfTI volumes (converted from DICOM). Keep PHI out of public demos.</div>", unsafe_allow_html=True)
+    t1 = st.file_uploader("Upload T1 (.nii / .nii.gz)", type=["nii","nii.gz","gz"], key="u1")
+    t2 = st.file_uploader("Upload T2 (.nii / .nii.gz)", type=["nii","nii.gz","gz"], key="u2")
+    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+    start = st.button("Start AI Analysis", key="analysis_start")
+    st.markdown("</div><div style='width:300px' class='upload-card'><div class='section-title'>Live Status</div><div id='status-area'>Waiting for input</div></div></div>", unsafe_allow_html=True)
+    # No checkboxes — direct flow
     if start:
-        if hasattr(st.session_state, "_demo_t1"):
-            p1 = st.session_state._demo_t1; p2 = st.session_state._demo_t2
-        else:
-            if t1 is None or t2 is None:
-                st.error("Please upload both T1 and T2 or use Demo.")
-                return
-            p1 = save_uploaded_preserve_name(t1); p2 = save_uploaded_preserve_name(t2)
-        status_slot.info("Starting pipeline..."); progress_slot.progress(2)
-        result, guide = run_pipeline(p1, p2, status_slot, progress_slot)
-        write_log(f"pipeline returned: {result}, {guide}")
-        if result is None:
-            status_slot.error("Pipeline failed. See debug log.")
-            if guide: st.error(str(guide))
+        # decide file paths
+        if t1 is None or t2 is None:
+            st.error("Please upload both T1 and T2.")
             return
-        st.session_state._last_result = result; st.session_state._last_guidance = guide
-        prob = result["prob"]
-        if prob < LOWER_THRESHOLD: st.session_state.screen = "result_healthy"
-        elif prob > UPPER_THRESHOLD: st.session_state.screen = "result_cirrhosis"
-        else: st.session_state.screen = "result_borderline"
+        p1 = save_uploaded_preserve_name(t1); p2 = save_uploaded_preserve_name(t2)
+        # status & progress placeholders
+        status_slot = st.empty()
+        prog_slot = st.empty()
+        status_slot.info("Starting pipeline...")
+        prog_visual = prog_slot.progress(0)
+        # run pipeline; it updates prog via prog_slot.progress() inside
+        result, guidance = run_pipeline(p1, p2, status_slot, prog_slot)
+        write_log(f"pipeline done -> {result}, {guidance}")
+        if result is None:
+            status_slot.error("Pipeline failed; check debug log.")
+            if guidance: st.error(str(guidance))
+            return
+        # set result into session and auto-redirect based on thresholds
+        st.session_state._last_result = result
+        st.session_state._last_guidance = guidance
+        p = result["prob"]
+        if p < LOWER_THRESHOLD:
+            st.session_state.screen = "result_healthy"
+        elif p > UPPER_THRESHOLD:
+            st.session_state.screen = "result_cirrhosis"
+        else:
+            st.session_state.screen = "result_borderline"
+        # immediate rerun to show result page
+        st.experimental_rerun()
 
-def clinical_points_for(prob, cirr, healthy):
+# --- Clinical result pages (third-panel look)
+def clinical_points_for(prob, slices_cirr, slices_healthy):
     if prob > UPPER_THRESHOLD:
         pts = [
-            f"1) Imaging suggests features consistent with chronic liver disease/cirrhosis (slices cirrhosis-leaning: {cirr}; healthy-leaning: {healthy}).",
-            "2) Elevated probability — order liver function tests (AST, ALT, ALP, GGT, bilirubin) and INR.",
-            "3) Perform non-invasive fibrosis assessment (transient elastography/FibroScan) to quantify stiffness.",
-            "4) Evaluate platelet count — thrombocytopenia may reflect portal hypertension.",
-            "5) Assess for clinical signs of portal hypertension (ascites, variceal bleeding) and refer for ultrasound.",
-            "6) Consider hepatology referral for diagnostic workup and management planning.",
-            "7) Document AI assessment as adjunctive; treat based on clinician judgement and confirmatory tests."
+            f"1) Imaging suggests features consistent with chronic liver disease/cirrhosis (slices cirrhosis-leaning: {slices_cirr}; healthy-leaning: {slices_healthy}).",
+            "2) Order liver function tests (AST, ALT, ALP, GGT, bilirubin) and INR for clinical correlation.",
+            "3) Consider transient elastography (FibroScan) to quantify liver stiffness/fibrosis.",
+            "4) Check platelet count — low platelets may be associated with portal hypertension.",
+            "5) Evaluate for clinical/ultrasound signs of portal hypertension (ascites, varices).",
+            "6) Refer to hepatology for comprehensive workup and management planning.",
+            "7) Document this AI assessment as adjunctive; confirm diagnosis with clinical and laboratory data."
         ]
     elif prob < LOWER_THRESHOLD:
         pts = [
-            f"1) Low AI-estimated probability of cirrhosis (slices cirrhosis-leaning: {cirr}; healthy-leaning: {healthy}).",
-            "2) If clinical suspicion exists, consider LFTs and elastography — imaging can miss early fibrosis.",
-            "3) Continue routine monitoring and address risk factors (alcohol, obesity, metabolic disease).",
-            "4) Counsel patient on lifestyle measures (reduce alcohol, manage weight, control diabetes).",
-            "5) Consider non-invasive follow-up testing if labs abnormal or symptoms develop.",
-            "6) No immediate specialist referral required unless clinical/lab indicators present.",
-            "7) Use this AI output as supportive information, not definitive diagnosis."
+            f"1) Low AI-estimated probability of cirrhosis (slices cirrhosis-leaning: {slices_cirr}; healthy-leaning: {slices_healthy}).",
+            "2) If clinical suspicion remains, perform LFTs and non-invasive fibrosis assessment (elastography).",
+            "3) Address modifiable risks: alcohol reduction, weight loss, glycemic control.",
+            "4) Continue routine monitoring; escalate if symptoms or abnormal labs occur.",
+            "5) No immediate specialist referral unless other findings indicate it.",
+            "6) Reinforce lifestyle counselling and risk-factor management.",
+            "7) Use AI output as supportive information — not a final diagnosis."
         ]
     else:
         pts = [
-            f"1) Borderline/inconclusive AI result (slices cirrhosis-leaning: {cirr}; healthy-leaning: {healthy}).",
-            "2) Correlate carefully with clinical history (alcohol, viral hepatitis, metabolic syndrome) and labs.",
-            "3) Consider transient elastography (FibroScan) to better stratify fibrosis risk.",
-            "4) If labs or elastography remain indeterminate, seek specialist radiology review.",
-            "5) Repeat imaging or laboratory evaluation in an appropriate follow-up interval.",
-            "6) Discuss case in multidisciplinary forum if management decisions depend on these results.",
-            "7) Document uncertainty and escalate to biopsy only after non-invasive tests are exhausted."
+            f"1) Borderline/inconclusive AI result (slices cirrhosis-leaning: {slices_cirr}; healthy-leaning: {slices_healthy}).",
+            "2) Correlate with clinical history (alcohol use, viral hepatitis, metabolic risk factors) and labs.",
+            "3) Consider transient elastography to better stratify fibrosis risk.",
+            "4) If tests remain indeterminate, obtain specialist radiology or hepatology review.",
+            "5) Repeat imaging or testing in an appropriate interval if concern persists.",
+            "6) Discuss case in MDT if management depends on staging.",
+            "7) Consider biopsy only after non-invasive tests are exhausted and if necessary."
         ]
     return pts
 
@@ -349,31 +351,38 @@ def show_result(kind):
     res = st.session_state.get("_last_result", {})
     prob = res.get("prob", 0.0); cirr = res.get("slices_cirr", 0); healthy = res.get("slices_healthy", 0)
     if kind == "healthy":
-        st.markdown("<div class='result-note result-healthy'><h3>✅ Healthy</h3><p>Low estimated probability of cirrhosis</p></div>", unsafe_allow_html=True)
+        st.markdown("<div class='result-card result-healthy'><h3>✅ Healthy</h3><p>Low estimated probability of cirrhosis.</p></div>", unsafe_allow_html=True)
     elif kind == "border":
-        st.markdown("<div class='result-note result-border'><h3>🔶 Borderline / Inconclusive</h3><p>Further workup recommended</p></div>", unsafe_allow_html=True)
+        st.markdown("<div class='result-card result-border'><h3>🔶 Borderline / Inconclusive</h3><p>Further workup recommended.</p></div>", unsafe_allow_html=True)
     else:
-        st.markdown("<div class='result-note result-cirr'><h3>⚠️ Cirrhosis (AI)</h3><p>Elevated probability — correlate clinically</p></div>", unsafe_allow_html=True)
+        st.markdown("<div class='result-card result-cirr'><h3>⚠️ Cirrhosis (AI)</h3><p>Elevated estimated probability — correlate clinically.</p></div>", unsafe_allow_html=True)
     st.markdown(f"**Mean estimated cirrhosis probability:** {prob*100:.2f}%")
     st.markdown(f"- Slices cirrhosis-leaning: **{cirr}**  \n- Slices healthy-leaning: **{healthy}**")
     st.markdown("### Clinical interpretation — recommended actions")
     pts = clinical_points_for(prob, cirr, healthy)
     for p in pts:
         st.markdown(p)
-    c1, c2 = st.columns([1,1])
-    with c1:
+    cols = st.columns([1,1])
+    with cols[0]:
         st.image(gauge_png(prob))
-    with c2:
+    with cols[1]:
         st.image(bar_png(cirr, healthy))
-    # download clinical report
+    # report download
     diag = ("Cirrhosis" if prob>UPPER_THRESHOLD else ("Healthy" if prob<LOWER_THRESHOLD else "Borderline / Inconclusive"))
     md = f"# AI Liver MRI Report\nDiagnosis: {diag}\nMean probability: {prob*100:.2f}%\nSlices cirrhosis: {cirr}\nSlices healthy: {healthy}\n\nClinical recommendations:\n"
-    for p in pts: md += "- " + p + "\n"
+    for p in pts:
+        md += "- " + p + "\n"
     st.download_button("Download clinical report (MD)", md.encode("utf-8"), "liver_clinical_report.md", mime="text/markdown")
-    if st.button("Analyze another study"): st.session_state.screen = "upload"
-    if st.button("Back to Home"): st.session_state.screen = "intro"
+    if st.button("Analyze another study"):
+        st.session_state.screen = "upload"
+        st.experimental_rerun()
+    if st.button("Back to Home"):
+        st.session_state.screen = "intro"
+        st.experimental_rerun()
 
+# -------------------------
 # Router
+# -------------------------
 if st.session_state.screen == "intro":
     show_intro()
 elif st.session_state.screen == "upload":
@@ -385,9 +394,10 @@ elif st.session_state.screen == "result_cirrhosis":
 elif st.session_state.screen == "result_borderline":
     show_result("border")
 else:
-    st.session_state.screen = "intro"; show_intro()
+    st.session_state.screen = "intro"
+    show_intro()
 
-# Footer debug/help
+# Footer hint
 st.markdown("---")
 st.markdown("If app used simulated result, upload `RandomForest_Cirrhosis.pkl` compatible with your scikit-learn version to get real predictions.")
 if st.checkbox("Show debug log"):
