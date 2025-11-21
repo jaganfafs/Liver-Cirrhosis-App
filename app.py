@@ -1,110 +1,113 @@
 # app.py
 """
-Cinematic Streamlit Liver MRI app (corrected & robust)
-- Full-screen hero with centered Start button (SVG + CSS)
-- Upload T1/T2 (.nii or .nii.gz) and run pipeline
-- Robust NIfTI load (preserve filename + gzip detect)
-- ViT-based feature extraction (timm) and RandomForest classification (joblib/cloudpickle)
-- If RF fails (unpickle or predict error), show helpful guidance and offer a simulated-demo result
-- Separate result screens for Healthy / Borderline / Cirrhosis
-- Progress bar and step messages
-- Debug log written to /tmp/pipeline_debug.log (visible in UI)
+Enhanced Cinematic Streamlit Liver MRI App
+- Functional centered Start button (Streamlit-native)
+- Uses uploaded MRI image from /mnt/data/... as hero background
+- Vibrant upload page with better visuals
+- Robust NIfTI loading and ViT + RF pipeline (with simulated fallback)
+- Separate results screens with clinical + technical interpretation in report
 """
-import os
-import io
-import time
-import gzip
-import shutil
-import base64
-import joblib
-import cloudpickle
+import os, io, time, gzip, shutil, base64, joblib, cloudpickle
 import numpy as np
 from PIL import Image
 import streamlit as st
 import nibabel as nib
 from skimage.transform import resize
 import cv2
-import torch
-import timm
+import torch, timm
 from torchvision import transforms
 import matplotlib.pyplot as plt
 
-# -----------------------
-# Configuration
-# -----------------------
+# ----------------------
+# CONFIG
+# ----------------------
 st.set_page_config(page_title="Liver MRI Cinematic", layout="wide")
-MODEL_PATH = "RandomForest_Cirrhosis.pkl"
+MODEL_PATH = "RandomForest_Cirrhosis.pkl"   # upload this to repo root for real predictions
+MRI_HERO_PATH = "/mnt/data/f09a1a95-f614-4982-a8e8-8e38ea70ccf7.png"  # your uploaded image path
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
 LOWER_THRESHOLD = 0.455
 UPPER_THRESHOLD = 0.475
 SLICE_INFO_THRESHOLD = 0.465
 
-# -----------------------
-# Utility helpers
-# -----------------------
-def write_log(s):
-    p = "/tmp/pipeline_debug.log"
-    with open(p, "a") as fh:
-        fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} | {s}\n")
+# ----------------------
+# Utilities & logging
+# ----------------------
+LOG_PATH = "/tmp/pipeline_debug.log"
+def write_log(msg):
+    with open(LOG_PATH, "a") as fh:
+        fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} | {msg}\n")
 
-def read_log_tail(n_lines=200):
-    p = "/tmp/pipeline_debug.log"
-    if not os.path.exists(p):
+def read_log(n=200):
+    if not os.path.exists(LOG_PATH):
         return ""
-    with open(p, "r") as fh:
+    with open(LOG_PATH, "r") as fh:
         lines = fh.readlines()
-    return "".join(lines[-n_lines:])
+    return "".join(lines[-n:])
 
-# -----------------------
-# CSS / hero visuals (SVG + CSS)
-# -----------------------
+# Clear log at start (helps during dev)
+open(LOG_PATH, "w").close()
+
+# ----------------------
+# CSS + Hero visuals
+# ----------------------
 st.markdown("""
 <style>
-body { font-family: "Inter", sans-serif; }
-.full-hero {
-  height: 75vh;
-  display:flex; align-items:center; justify-content:center;
-  position:relative; border-radius:12px;
-  background: linear-gradient(135deg,#071230,#082a3b);
-  color: #fff; overflow:hidden;
+:root { --card-bg: #ffffff; --accent1: #7c3aed; --accent2: #00c2ff; --muted: #6b7280; }
+.hero {
+  height: 70vh; border-radius: 16px; overflow:hidden; position:relative;
+  display:flex; align-items:center; justify-content:center; color:white;
+  background-size: cover; background-position:center; box-shadow: 0 20px 50px rgba(2,6,23,0.2);
 }
-.hero-content { text-align:center; z-index:2; }
-.hero-title { font-size:44px; margin: 0; font-weight:700; letter-spacing: -0.02em; }
-.hero-sub { opacity:0.9; margin-top:8px; color:#dbeefd; }
-.big-start {
-  margin-top:18px; padding:14px 28px; font-size:18px; color:#fff; border-radius:12px; border:none;
-  background: linear-gradient(90deg,#7c3aed,#00c2ff); box-shadow: 0 8px 28px rgba(0,0,0,0.35); cursor:pointer;
-}
-.fade-in { animation: fadeScale 0.6s ease both; opacity:0; transform:scale(0.98); }
-@keyframes fadeScale { to { opacity:1; transform:scale(1); } }
-.section-card { padding:18px; border-radius:10px; background:#fff; box-shadow:0 8px 30px rgba(2,6,23,0.04); }
-.progress-big { height:16px; border-radius:10px; background:#e6f0ff; overflow:hidden; }
-.progress-fill { height:100%; background:linear-gradient(90deg,#7c3aed,#00c2ff); width:0%; transition: width 0.5s ease; }
-.result-healthy { background: linear-gradient(90deg,#e8fff2,#d7fff0); padding:16px; border-radius:10px; }
-.result-cirr { background: linear-gradient(90deg,#fff0f0,#ffe6e6); padding:16px; border-radius:10px; }
-.result-border { background: linear-gradient(90deg,#fffaf0,#fff5e6); padding:16px; border-radius:10px; }
+.hero-overlay { position:absolute; inset:0; background:linear-gradient(180deg, rgba(2,6,23,0.55), rgba(2,6,23,0.65)); }
+.hero-inner { z-index:2; text-align:center; padding:32px; }
+.hero-title { font-size:48px; font-weight:800; margin:0; }
+.hero-sub { color: #dbeafd; margin-top:10px; }
+.center-btn { margin-top:22px; padding:14px 28px; font-size:18px; border-radius:12px; border:none; color:white;
+  background: linear-gradient(90deg,var(--accent1), var(--accent2)); box-shadow: 0 12px 30px rgba(124,58,237,0.2); cursor:pointer; }
+.upload-card { padding:20px; border-radius:12px; background:var(--card-bg); box-shadow: 0 12px 30px rgba(2,6,23,0.04); }
+.vibrant { background: linear-gradient(90deg, rgba(124,58,237,0.08), rgba(0,194,255,0.06)); border-radius:12px; padding:14px; }
+.progress-big { height: 16px; background:#e6f0ff; border-radius:10px; overflow:hidden; margin-top:12px; }
+.progress-fill { height:100%; background: linear-gradient(90deg, var(--accent1), var(--accent2)); width:0%; transition: width 0.5s ease; }
+.small-muted { color: var(--muted); font-size:14px; }
+.section-title { font-size:20px; font-weight:700; margin-bottom:6px; }
+.result-note { padding:16px; border-radius:12px; margin-bottom:14px; }
+.result-healthy{ background:linear-gradient(90deg,#e8fff2,#d7fff0); }
+.result-border{ background:linear-gradient(90deg,#fffaf0,#fff5e6); }
+.result-cirr{ background:linear-gradient(90deg,#fff0f0,#ffe6e6); }
 </style>
 """, unsafe_allow_html=True)
 
+# ----------------------
+# Small SVGs & icons
+# ----------------------
 LIVER_SVG = """
-<svg width="180" height="120" viewBox="0 0 200 120" xmlns="http://www.w3.org/2000/svg">
+<svg width="160" height="96" viewBox="0 0 200 120" xmlns="http://www.w3.org/2000/svg">
   <path d="M20,70 C30,20 160,20 180,60 C188,80 160,110 110,110 C70,110 40,90 20,70 Z" fill="#ffb4a2" opacity="0.95"/>
 </svg>
 """
 
 DOCTOR_SVG = """
-<svg width="80" height="80" viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
+<svg width="88" height="88" viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
   <circle cx="60" cy="60" r="58" fill="#e6f0ff"/>
-  <g transform="translate(16,14)"><rect x="20" y="40" rx="6" ry="6" width="60" height="40" fill="#fff" stroke="#c7ddff"/><circle cx="40" cy="24" r="14" fill="#ffe8d6"/></g>
+  <g transform="translate(16,14)"><rect x="20" y="40" rx="6" width="60" height="40" fill="#fff" stroke="#c7ddff"/><circle cx="40" cy="24" r="14" fill="#ffe8d6"/></g>
 </svg>
 """
 
-# -----------------------
-# Load ViT (cached resource)
-# -----------------------
+NURSE_SVG = """
+<svg width="88" height="88" viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
+  <circle cx="60" cy="60" r="58" fill="#fff6e6"/>
+  <g transform="translate(16,14)"><rect x="20" y="38" rx="6" width="60" height="42" fill="#fff" stroke="#fee8b8"/><circle cx="40" cy="24" r="14" fill="#ffdede"/></g>
+</svg>
+"""
+
+# ----------------------
+# Model resources
+# ----------------------
 @st.cache_resource(show_spinner=False)
 def get_vit():
     model = timm.create_model("vit_base_patch16_224", pretrained=True)
+    # replace classifier with identity to get embeddings
     if hasattr(model, "head"):
         model.head = torch.nn.Identity()
     elif hasattr(model, "fc"):
@@ -116,20 +119,17 @@ def get_vit():
 vit_model = get_vit()
 transform_3ch = transforms.Compose([transforms.ToTensor(), transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])])
 
-# -----------------------
-# Safe RF loader (joblib, cloudpickle fallback). Cached.
-# -----------------------
 @st.cache_resource(show_spinner=False)
-def load_rf_safe(path=MODEL_PATH):
+def load_rf_model(path=MODEL_PATH):
     if not os.path.exists(path):
-        return None, f"Model not found at path: {path}"
+        return None, f"Model file {path} not found."
     try:
         m = joblib.load(path)
         return m, None
     except ModuleNotFoundError as mnf:
-        return None, f"ModuleNotFoundError while loading RF: {mnf}. Hint: pin scikit-learn."
+        return None, f"ModuleNotFoundError: {mnf}"
     except Exception as e:
-        # fallback try cloudpickle
+        # try cloudpickle fallback
         try:
             with open(path,"rb") as fh:
                 m = cloudpickle.load(fh)
@@ -137,47 +137,46 @@ def load_rf_safe(path=MODEL_PATH):
         except Exception as e2:
             return None, f"Failed to load model. joblib error: {e}; cloudpickle error: {e2}"
 
-rf_model, rf_error = load_rf_safe()
+rf_model, rf_error = load_rf_model()
 
-# -----------------------
+# ----------------------
 # NIfTI helpers
-# -----------------------
+# ----------------------
 def save_uploaded_preserve_name(uploaded_file, target_dir="/tmp"):
     name = getattr(uploaded_file, "name", None) or "uploaded.nii"
-    safe = name.replace(" ","_")
+    safe = name.replace(" ", "_")
     out = os.path.join(target_dir, safe)
     with open(out, "wb") as fh:
         fh.write(uploaded_file.getbuffer())
-    write_log(f"Saved uploaded file to {out}")
+    write_log(f"Saved upload to {out}")
     return out
 
 def ensure_correct_and_load(path):
-    # detect gzip magic
-    with open(path,"rb") as fh:
+    with open(path, "rb") as fh:
         head = fh.read(2)
     is_gz = head == b'\x1f\x8b'
     if is_gz and not path.endswith(".gz"):
         newp = path + ".gz"
         os.rename(path, newp)
         path = newp
-        write_log(f"Renamed to gz: {path}")
+        write_log(f"renamed to {newp}")
     if (not is_gz) and path.endswith(".gz"):
         try:
             outp = path[:-3]
-            with gzip.open(path,"rb") as gz, open(outp,"wb") as o:
-                shutil.copyfileobj(gz,o)
+            with gzip.open(path, "rb") as g, open(outp, "wb") as o:
+                shutil.copyfileobj(g,o)
             path = outp
-            write_log(f"Decompressed gz file to: {path}")
+            write_log(f"decompressed to {outp}")
         except Exception as e:
-            write_log(f"Failed to decompress {path}: {e}")
+            write_log(f"decompress failed: {e}")
     img = nib.load(path)
     return img
 
-# -----------------------
-# Preprocess & feature helpers
-# -----------------------
+# ----------------------
+# Preprocess & features
+# ----------------------
 def nlm_denoise(slice_img):
-    img = np.clip(slice_img*255, 0,255).astype(np.uint8)
+    img = np.clip(slice_img*255,0,255).astype(np.uint8)
     den = cv2.fastNlMeansDenoising(img, None, h=10, templateWindowSize=7, searchWindowSize=21)
     return den.astype(np.float32)/255.0
 
@@ -192,12 +191,12 @@ def preprocess_slice(sl):
     return sln
 
 def vit_extract_batch(slices):
-    if len(slices)==0:
+    if len(slices) == 0:
         return np.zeros((0, getattr(vit_model,"embed_dim",768)), dtype=np.float32)
     batch = []
     for s in slices:
         img = np.clip(s*255,0,255).astype(np.uint8)
-        rgb = np.stack([img]*3,axis=-1)
+        rgb = np.stack([img]*3, axis=-1)
         pil = Image.fromarray(rgb)
         batch.append(transform_3ch(pil))
     xb = torch.stack(batch).to(DEVICE)
@@ -207,15 +206,15 @@ def vit_extract_batch(slices):
 
 def fuse_features(t1f, t2f):
     L = min(len(t1f), len(t2f))
-    if L==0:
+    if L == 0:
         d1 = t1f.shape[1] if len(t1f)>0 else 0
         d2 = t2f.shape[1] if len(t2f)>0 else 0
         return np.zeros((0, d1+d2), dtype=np.float32)
     return np.concatenate([t1f[:L], t2f[:L]], axis=1)
 
-# -----------------------
-# Visualization helpers
-# -----------------------
+# ----------------------
+# Visual helpers
+# ----------------------
 def fig_to_b64(fig):
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0)
@@ -232,36 +231,47 @@ def gauge_png(prob):
     return fig_to_b64(fig)
 
 def bar_png(cirr, healthy):
-    fig, ax = plt.subplots(figsize=(4,2.2))
+    fig, ax = plt.subplots(figsize=(4,2))
     ax.bar(['Cirrhosis','Healthy'], [cirr, healthy], color=['#ff7b7b','#7bcff2'])
-    ax.set_ylabel('Slices')
+    ax.set_ylabel("Slices")
     return fig_to_b64(fig)
 
-# -----------------------
-# Pipeline with robust error handling and simulated fallback
-# -----------------------
-def run_pipeline_paths(t1_path, t2_path, status_slot, prog_slot):
-    write_log("Pipeline started")
-    # 1. load niftis
+# ----------------------
+# Simulation fallback (clearly labeled)
+# ----------------------
+def simulate_prob_by_stats(vol1, vol2):
+    m1 = float(np.nanmean(vol1))
+    m2 = float(np.nanmean(vol2))
+    if (m1 + m2) == 0:
+        return 0.25
+    r = m2 / (m1 + 1e-8)
+    p = 0.35 + (0.4 * (r / (1 + r)))
+    return float(min(max(p, 0.05), 0.95))
+
+# ----------------------
+# Pipeline
+# ----------------------
+def run_pipeline_from_paths(t1_path, t2_path, status_slot, prog_slot):
+    write_log("pipeline start")
     try:
-        status_slot.info("Validating and loading volumes...")
+        status_slot.info("Validating volumes...")
         prog_slot.progress(5)
         img1 = ensure_correct_and_load(t1_path)
         img2 = ensure_correct_and_load(t2_path)
     except Exception as e:
-        write_log(f"Nibabel load error: {e}")
+        write_log(f"nib load error: {e}")
         status_slot.error("Error loading NIfTI: " + str(e))
-        return None, f"NIfTI load error: {e}"
+        return None, f"NIfTI error: {e}"
 
     vol1 = img1.get_fdata().astype(np.float32)
     vol2 = img2.get_fdata().astype(np.float32)
-    write_log(f"Volume shapes: {vol1.shape} / {vol2.shape}")
+    write_log(f"vol shapes {vol1.shape} / {vol2.shape}")
     n = min(vol1.shape[2], vol2.shape[2])
-    if n<=0:
-        status_slot.error("Empty volumes / no axial slices.")
+    if n <= 0:
+        status_slot.error("Empty volumes or no axial slices.")
         return None, "Empty volumes"
 
-    # preprocess
+    # preprocessing
     status_slot.info(f"Preprocessing {n} slices...")
     prog_slot.progress(8)
     t1_s, t2_s = [], []
@@ -270,8 +280,8 @@ def run_pipeline_paths(t1_path, t2_path, status_slot, prog_slot):
             t1s = preprocess_slice(vol1[:,:,i])
             t2s = preprocess_slice(vol2[:,:,i])
         except Exception as e:
-            write_log(f"Preprocess slice {i} error: {e}")
-            status_slot.error(f"Preprocessing failed at slice {i}: {e}")
+            write_log(f"preprocess slice {i} error: {e}")
+            status_slot.error(f"Preprocessing failed on slice {i}: {e}")
             return None, f"Preprocess error: {e}"
         t1_s.append(t1s); t2_s.append(t2s)
         prog_slot.progress(int(8 + 32*(i+1)/n))
@@ -287,49 +297,49 @@ def run_pipeline_paths(t1_path, t2_path, status_slot, prog_slot):
             f1 = vit_extract_batch(t1_s[start:end])
             f2 = vit_extract_batch(t2_s[start:end])
         except Exception as e:
-            write_log(f"ViT extraction error {start}:{end} -> {e}")
+            write_log(f"vit extract error {start}:{end} -> {e}")
             status_slot.error("Feature extraction error: " + str(e))
             return None, f"ViT error: {e}"
         f1_chunks.append(f1); f2_chunks.append(f2)
         prog_slot.progress(int(42 + 20*(end)/n))
-    feats1 = np.concatenate(f1_chunks, axis=0) if f1_chunks else np.zeros((0,getattr(vit_model,"embed_dim",768)))
-    feats2 = np.concatenate(f2_chunks, axis=0) if f2_chunks else np.zeros((0,getattr(vit_model,"embed_dim",768)))
-    write_log(f"Feats shapes: {feats1.shape}, {feats2.shape}")
 
-    # fuse and classify
-    status_slot.info("Fusing features and running classifier...")
+    feats1 = np.concatenate(f1_chunks, axis=0) if f1_chunks else np.zeros((0, getattr(vit_model,"embed_dim",768)))
+    feats2 = np.concatenate(f2_chunks, axis=0) if f2_chunks else np.zeros((0, getattr(vit_model,"embed_dim",768)))
+    write_log(f"feats shapes {feats1.shape} / {feats2.shape}")
+
+    status_slot.info("Fusing features and classifying...")
     prog_slot.progress(68)
     fused = fuse_features(feats1, feats2)
-    write_log(f"Fused shape: {fused.shape}")
+    write_log(f"fused {fused.shape}")
 
-    if fused.shape[0]==0:
+    if fused.shape[0] == 0:
         status_slot.error("No fused features produced.")
         return None, "No fused features"
 
     if rf_model is None:
-        # explicit helpful message
-        msg = rf_error or "RandomForest model not loaded in app."
-        write_log("RF model missing or error: " + str(msg))
-        status_slot.error("RandomForest unavailable: " + str(msg))
-        # Offer to produce simulated output for UI demo
-        prob = simulate_prob_by_image_stats(vol1, vol2)
-        return {"simulated": True, "prob": prob, "n_slices": len(fused), "slices_cirr": int((prob>=SLICE_INFO_THRESHOLD)*len(fused)),
-                "slices_healthy": int((1-(prob>=SLICE_INFO_THRESHOLD))*len(fused))}, None
+        # provide simulated fallback with clear label
+        write_log("rf missing: providing simulated output")
+        prob = simulate_prob_by_stats(vol1, vol2)
+        ret = {"simulated": True, "prob": prob, "n_slices": len(fused),
+               "slices_cirr": int((prob >= SLICE_INFO_THRESHOLD) * len(fused)),
+               "slices_healthy": int((1 - (prob >= SLICE_INFO_THRESHOLD)) * len(fused))}
+        prog_slot.progress(100)
+        status_slot.success("Simulation complete (model missing).")
+        return ret, "Model missing; simulated result returned."
 
-    # Try predict_proba with clear exception handling
+    # try predict_proba
     try:
         probs = rf_model.predict_proba(fused)[:,1]
     except Exception as e:
-        write_log(f"predict_proba error: {e}. fused.shape={fused.shape}")
-        # Provide actionable guidance + simulated fallback
-        status_slot.error("Model prediction failed: " + str(e))
-        guidance = ("The RandomForest prediction failed. This often happens when the saved model "
-                    "expects a different feature-length than the fused features produced here (feature mismatch), "
-                    "or a scikit-learn version mismatch when unpickling. See debug logs.")
-        write_log("Providing simulated output due to model predict error.")
-        prob = simulate_prob_by_image_stats(vol1, vol2)
-        return {"simulated": True, "prob": prob, "n_slices": len(fused), "slices_cirr": int((prob>=SLICE_INFO_THRESHOLD)*len(fused)),
-                "slices_healthy": int((1-(prob>=SLICE_INFO_THRESHOLD))*len(fused))}, guidance
+        write_log(f"predict_proba error: {e} fused.shape={fused.shape}")
+        # simulated fallback
+        prob = simulate_prob_by_stats(vol1, vol2)
+        ret = {"simulated": True, "prob": prob, "n_slices": len(fused),
+               "slices_cirr": int((prob >= SLICE_INFO_THRESHOLD) * len(fused)),
+               "slices_healthy": int((1 - (prob >= SLICE_INFO_THRESHOLD)) * len(fused))}
+        prog_slot.progress(100)
+        status_slot.error("Model prediction failed; simulated fallback used.")
+        return ret, f"predict_proba error: {e}"
 
     final_prob = float(np.mean(probs))
     slices_cirr = int((probs >= SLICE_INFO_THRESHOLD).sum())
@@ -341,148 +351,171 @@ def run_pipeline_paths(t1_path, t2_path, status_slot, prog_slot):
 
     return {"simulated": False, "prob": final_prob, "n_slices": len(probs), "slices_cirr": slices_cirr, "slices_healthy": slices_healthy}, None
 
-# simple simulation function (clear label in UI)
-def simulate_prob_by_image_stats(vol1, vol2):
-    # simple heuristic: ratio of mean intensities -> scaled into [0.1,0.9]
-    m1 = float(np.nanmean(vol1))
-    m2 = float(np.nanmean(vol2))
-    if (m1 + m2) == 0:
-        return 0.25
-    r = m2 / (m1 + 1e-8)
-    p = 0.3 + (0.4 * (r / (1 + r)))  # map ratio into 0.3..0.7 roughly
-    return float(min(max(p, 0.05), 0.95))
-
-# -----------------------
-# UI screens
-# -----------------------
+# ----------------------
+# UI: screens
+# ----------------------
 if "screen" not in st.session_state:
     st.session_state.screen = "intro"
 
 def show_intro():
-    st.markdown(f"<div class='full-hero'><div class='hero-content fade-in'>{LIVER_SVG if LIVER_SVG else ''}<h1 class='hero-title'>Liver MRI Cinematic</h1><p class='hero-sub'>AI-assisted research tool — not a diagnostic device. Click start to continue.</p><div><button class='big-start' onclick=''>▶ Start</button></div></div></div>", unsafe_allow_html=True)
-    # fallback button (Streamlit handles interactions)
-    if st.button("Start", key="start_fallback"):
-        st.session_state.screen = "upload"
+    # show MRI hero (if available) - else show gradient hero
+    if os.path.exists(MRI_HERO_PATH):
+        b64 = base64.b64encode(open(MRI_HERO_PATH,"rb").read()).decode("utf-8")
+        bg_style = f"background-image: url(data:image/png;base64,{b64});"
+    else:
+        bg_style = ""
+    st.markdown(f"<div class='hero' style='{bg_style}'>"
+                f"<div class='hero-overlay'></div>"
+                f"<div class='hero-inner'>"
+                f"<div style='margin-bottom:12px'>{LIVER_SVG}</div>"
+                f"<div class='hero-title'>Liver MRI Cinematic</div>"
+                f"<div class='hero-sub'>AI-assisted research support for cirrhosis screening — not a diagnosis.</div>"
+                f"<div style='margin-top:18px'>"
+                f"</div>"
+                f"</div></div>", unsafe_allow_html=True)
+
+    # Centered Start button (real Streamlit button — reliable)
+    col1, col2, col3 = st.columns([1,2,1])
+    with col2:
+        if st.button("▶ Start", key="center_start", help="Click to proceed to upload and analysis", use_container_width=False):
+            st.session_state.screen = "upload"
 
 def show_upload():
-    st.markdown("<div class='section-card fade-in'><h3>Upload paired T1 and T2 MRI volumes (.nii / .nii.gz)</h3></div>", unsafe_allow_html=True)
-    col1, col2 = st.columns([1,1])
-    with col1:
+    st.markdown("<div class='upload-card vibrant'><div style='display:flex; justify-content:space-between; align-items:center;'><div><div class='section-title'>Upload paired T1 and T2 MRI volumes (.nii / .nii.gz)</div><div class='small-muted'>Please upload DICOM-converted NIfTI volumes. Keep PHI out of public demos.</div></div><div style='display:flex; gap:10px; align-items:center;'>"
+                f"<div style='text-align:center'>{DOCTOR_SVG}<div class='small-muted'>Dr. AI</div></div>"
+                f"<div style='text-align:center'>{NURSE_SVG}<div class='small-muted'>Nurse AI</div></div>"
+                "</div></div></div>", unsafe_allow_html=True)
+
+    left, right = st.columns([1,1])
+    with left:
         t1 = st.file_uploader("Upload T1 (.nii / .nii.gz)", type=["nii","nii.gz","gz"])
         t2 = st.file_uploader("Upload T2 (.nii / .nii.gz)", type=["nii","nii.gz","gz"])
-        demo_btn = st.button("Use Synthetic Demo (UI demo)")
-        start_btn = st.button("Start AI Analysis")
-    with col2:
-        st.markdown("<div class='section-card'><h4>Status</h4><div id='status'>Waiting...</div></div>", unsafe_allow_html=True)
+        st.markdown("<div style='height:8px'></div>")
+        demo = st.button("Use Synthetic Demo (fast demo)")
+        start = st.button("Start AI Analysis")
+    with right:
         status_slot = st.empty()
         progress_slot = st.empty()
-        # show debug toggle
         if st.checkbox("Show debug log (last 200 lines)"):
-            st.text_area("Debug log", read_log_tail(200), height=200)
+            st.text_area("Debug log", read_log(200), height=260)
 
-    # use synthetic demo data
-    if demo_btn:
-        demo_t1 = np.zeros((64,64,16), dtype=np.float32)
-        demo_t2 = np.zeros((64,64,16), dtype=np.float32)
-        demo_t1[16:48,16:48,6:10] = 0.6
-        demo_t2[18:46,18:46,6:10] = 0.4
+    if demo:
+        # create small synthetic volumes for UI/demo
+        v1 = np.zeros((64,64,16), dtype=np.float32)
+        v2 = np.zeros((64,64,16), dtype=np.float32)
+        v1[18:46,18:46,6:10] = 0.6
+        v2[20:44,20:44,6:10] = 0.4
         p1 = "/tmp/demo_t1.nii"; p2 = "/tmp/demo_t2.nii"
-        nib.Nifti1Image(demo_t1, affine=np.eye(4)).to_filename(p1)
-        nib.Nifti1Image(demo_t2, affine=np.eye(4)).to_filename(p2)
-        st.success("Demo volumes created. Click Start AI Analysis.")
+        nib.Nifti1Image(v1, affine=np.eye(4)).to_filename(p1)
+        nib.Nifti1Image(v2, affine=np.eye(4)).to_filename(p2)
+        st.success("Synthetic demo created. Click Start AI Analysis.")
         st.session_state._demo_t1 = p1; st.session_state._demo_t2 = p2
 
-    if start_btn:
-        # which source?
-        if hasattr(st.session_state, "_demo_t1") and hasattr(st.session_state, "_demo_t2"):
+    if start:
+        if hasattr(st.session_state, "_demo_t1"):
             p1 = st.session_state._demo_t1; p2 = st.session_state._demo_t2
         else:
             if t1 is None or t2 is None:
-                st.error("Please upload both T1 and T2 files or pick Demo.")
+                st.error("Please upload both T1 and T2 or use Synthetic Demo.")
                 return
             p1 = save_uploaded_preserve_name(t1); p2 = save_uploaded_preserve_name(t2)
         status_slot.info("Starting pipeline...")
         progress_slot.progress(2)
-        result, guidance = run_pipeline_paths(p1, p2, status_slot, progress_slot)
-        write_log(f"Pipeline returned result={result}, guidance={guidance}")
+        result, guidance = run_pipeline_from_paths(p1, p2, status_slot, progress_slot)
+        write_log(f"pipeline result: {result}, guidance: {guidance}")
         if result is None:
             status_slot.error("Pipeline failed. See debug log for details.")
             if guidance:
                 st.error(str(guidance))
             return
-        # save result in session_state
         st.session_state._last_result = result
         st.session_state._last_guidance = guidance
-        # set result screen based on prob
-        prob = result["prob"]
-        if result.get("simulated", False):
-            st.session_state._simulated = True
-        else:
-            st.session_state._simulated = False
-        if prob < LOWER_THRESHOLD:
+        if result["prob"] < LOWER_THRESHOLD:
             st.session_state.screen = "result_healthy"
-        elif prob > UPPER_THRESHOLD:
+        elif result["prob"] > UPPER_THRESHOLD:
             st.session_state.screen = "result_cirrhosis"
         else:
             st.session_state.screen = "result_borderline"
 
 def show_result_common():
     res = st.session_state.get("_last_result", {})
-    sim = st.session_state.get("_simulated", False)
+    sim = res.get("simulated", False)
     prob = res.get("prob", None)
     cirr = res.get("slices_cirr", 0)
     healthy = res.get("slices_healthy", 0)
     if sim:
-        st.warning("Note: This result is SIMULATED for UI demo because the RandomForest model was unavailable or failed. Upload a working pickle to get real predictions.")
-    if prob is not None:
-        st.markdown(f"**Mean estimated cirrhosis probability:** {prob*100:.2f}%")
-    st.markdown(f"- Slices cirrhosis-leaning: **{cirr}**    \n- Slices healthy-leaning: **{healthy}**")
+        st.warning("This result is SIMULATED because the RandomForest model was unavailable or failed. Upload a working model for real predictions.")
+    st.markdown(f"**Mean estimated cirrhosis probability:** {prob*100:.2f}%")
+    st.markdown(f"- **Slices cirrhosis-leaning:** {cirr}  \n- **Slices healthy-leaning:** {healthy}")
     col1, col2 = st.columns([1,1])
     with col1:
-        if prob is not None:
-            st.image(gauge_png(prob))
+        st.image(gauge_png(prob))
     with col2:
         st.image(bar_png(cirr, healthy))
-    # download report
-    md = f"# AI Liver MRI Report\n\nDiagnosis: {'Cirrhosis' if prob>UPPER_THRESHOLD else ('Healthy' if prob<LOWER_THRESHOLD else 'Borderline / Inconclusive')}\nMean prob: {prob*100:.2f}%\nSlices cirrhosis: {cirr}\nSlices healthy: {healthy}\n\n(This is a research tool.)"
-    st.download_button("Download report (MD)", md.encode("utf-8"), "liver_report.md", mime="text/markdown")
+    # medical + technical explanation
+    st.markdown("### Clinical interpretation (concise)")
+    if prob is not None:
+        if prob > UPPER_THRESHOLD:
+            st.markdown("**AI Radiology Note:** The model indicates an elevated probability of cirrhosis. Correlate with clinical status, LFTs (AST, ALT, bilirubin), platelet count, ultrasound elastography, and consider hepatology referral. Imaging signs suggestive of chronic liver disease include surface nodularity, caudate lobe hypertrophy, and heterogeneous parenchymal signal. This tool is an **assistive** device; decisions should be by clinicians.")
+        elif prob < LOWER_THRESHOLD:
+            st.markdown("**AI Radiology Note:** The model indicates a low probability of cirrhosis. If clinical suspicion remains high, consider further tests (elastography, LFTs), as imaging alone may miss early fibrosis.")
+        else:
+            st.markdown("**AI Radiology Note:** The model is inconclusive (borderline). Recommend hepatology/radiology review and additional diagnostic tests as indicated.")
+    st.markdown("### Technical summary (how the AI decided)")
+    st.markdown("- Input: Paired axial T1 & T2 NIfTI slices\n- Feature extraction: Vision Transformer (ViT) embeddings per slice\n- Fusion: Concatenate T1 & T2 embeddings slice-wise\n- Classifier: RandomForest (slice-level probabilities averaged to a study-level score)\n- Borderline band: results in a pre-defined inconclusive region to reduce false positives/negatives.")
+    # Downloadable report contains both medical & technical details
+    md_report = f"""# AI Liver MRI Report
+Diagnosis: {'Cirrhosis' if prob>UPPER_THRESHOLD else ('Healthy' if prob<LOWER_THRESHOLD else 'Borderline / Inconclusive')}
+Mean cirrhosis probability: {prob*100:.2f}%
+Slices analysed: {res.get('n_slices', 'NA')}
+Cirrhosis-leaning: {cirr}
+Healthy-leaning: {healthy}
+
+Clinical guidance:
+{('Elevated probability; correlate clinically. Recommend LFTs, elastography, hepatology referral.' if prob>UPPER_THRESHOLD else ('Low probability; correlate with clinical findings.' if prob<LOWER_THRESHOLD else 'Inconclusive; specialist review advised.'))}
+
+Technical summary:
+- ViT features + RandomForest classifier; fused T1/T2 slice embeddings; averaged slice probabilities.
+- Note: If result is simulated, re-save and upload the RandomForest pickle compatible with current scikit-learn version.
+"""
+    st.download_button("Download full report (Markdown)", md_report.encode("utf-8"), "liver_report.md", mime="text/markdown")
     if st.button("Analyze another study"):
         st.session_state.screen = "upload"
     if st.button("Back to Home"):
         st.session_state.screen = "intro"
 
 def show_result_healthy():
-    st.markdown("<div class='result-healthy'><h2>✅ Healthy (AI)</h2><p>Low model-estimated cirrhosis probability.</p></div>", unsafe_allow_html=True)
-    show_result_common()
-
-def show_result_cirrhosis():
-    st.markdown("<div class='result-cirr'><h2>⚠️ Cirrhosis (AI)</h2><p>Elevated model-estimated cirrhosis probability. Correlate clinically.</p></div>", unsafe_allow_html=True)
+    st.markdown("<div class='result-note result-healthy'><h3>✅ Healthy</h3><p>Low model-estimated probability of cirrhosis.</p></div>", unsafe_allow_html=True)
     show_result_common()
 
 def show_result_borderline():
-    st.markdown("<div class='result-border'><h2>🔶 Borderline / Inconclusive</h2><p>Model output falls within the borderline range; specialist review advised.</p></div>", unsafe_allow_html=True)
+    st.markdown("<div class='result-note result-border'><h3>🔶 Borderline / Inconclusive</h3><p>Result is within the borderline range — specialist review recommended.</p></div>", unsafe_allow_html=True)
     show_result_common()
 
-# -----------------------
+def show_result_cirrhosis():
+    st.markdown("<div class='result-note result-cirr'><h3>⚠️ Cirrhosis (AI)</h3><p>Elevated model-estimated probability. Correlate with clinical and lab data.</p></div>", unsafe_allow_html=True)
+    show_result_common()
+
+# ----------------------
 # Router
-# -----------------------
+# ----------------------
 if st.session_state.screen == "intro":
     show_intro()
 elif st.session_state.screen == "upload":
     show_upload()
 elif st.session_state.screen == "result_healthy":
     show_result_healthy()
-elif st.session_state.screen == "result_cirrhosis":
-    show_result_cirrhosis()
 elif st.session_state.screen == "result_borderline":
     show_result_borderline()
+elif st.session_state.screen == "result_cirrhosis":
+    show_result_cirrhosis()
 else:
     st.session_state.screen = "intro"
     show_intro()
 
-# helpful footer & diagnostics
+# Footer developer tip
 st.markdown("---")
-st.markdown("**Developer tips:** If the app used a simulated result, re-save your RandomForest pickle in the same environment you trained (matching scikit-learn), then upload `RandomForest_Cirrhosis.pkl` to the repo root. Example Colab snippet to re-save:\n\n```python\nimport joblib\nmodel = joblib.load('/path/to/old.pkl')\njoblib.dump(model, 'RandomForest_Cirrhosis.pkl', compress=3)\n```")
-if st.checkbox("Show raw debug log"):
-    st.text_area("Pipeline debug log", read_log_tail(400), height=300)
+st.markdown("**Note:** If the Streamlit app shows a SIMULATED result, it means the RandomForest pickle was not loaded or failed during prediction. Re-save the model using the same scikit-learn version used during training and upload `RandomForest_Cirrhosis.pkl` to the repository root. Example Colab snippet:\n\n```python\nimport joblib\nm = joblib.load('/path/to/original.pkl')\njoblib.dump(m, 'RandomForest_Cirrhosis.pkl', compress=3)\n```")
+if st.checkbox("Show debug log"):
+    st.text_area("Debug log", read_log(400), height=280)
 
